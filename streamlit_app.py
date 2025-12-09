@@ -61,7 +61,7 @@ with col1:
             texts.append(txt)
             mids.append(mid)
         # cluster
-        clusters = clusterer.make_clusters(texts, distance_threshold=0.35)
+        clusters = clusterer.make_clusters(texts, distance_threshold=0.38)
         st.session_state["clusters"] = {"mapping": clusters, "texts": texts, "mids": mids}
         st.success(f"Formed {len(clusters)} clusters.")
 
