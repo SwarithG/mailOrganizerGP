@@ -61,7 +61,7 @@ with col1:
             texts.append(txt)
             mids.append(mid)
         # cluster
-        clusters = clusterer.make_clusters(texts, distance_threshold=0.38)
+        clusters = clusterer.hybrid_clusters(texts)
         st.session_state["clusters"] = {"mapping": clusters, "texts": texts, "mids": mids}
         st.success(f"Formed {len(clusters)} clusters.")
 
@@ -150,10 +150,16 @@ with col2:
                                 out = safe_delete_score_for_message(text)
                                 st.write(out)
 
+                    # if st.button("Delete selected emails (permanently)"):
+                    #     if st.checkbox("Confirm permanent deletion of selected messages?"):
+                    #         ids_to_delete = sel
+                    #         bulk_delete_with_retry(gmail, ids_to_delete)
+                    #         st.success(f"Deleted {len(ids_to_delete)} messages.")
                     if st.button("Delete selected emails (permanently)"):
                         if st.checkbox("Confirm permanent deletion of selected messages?"):
                             ids_to_delete = sel
-                            bulk_delete_with_retry(gmail, ids_to_delete)
-                            st.success(f"Deleted {len(ids_to_delete)} messages.")
+                            # safer + works with gmail.modify
+                            gmail.move_to_trash(ids_to_delete)
+                            st.success(f"Moved {len(ids_to_delete)} messages to Trash.")
     else:
         st.info("Scan your mailbox to see clusters.")
