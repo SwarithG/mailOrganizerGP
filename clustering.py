@@ -104,7 +104,7 @@ class Clusterer:
     def pick_threshold(self, texts: List[str], emb: np.ndarray):
         n = len(texts)
         if n < 200:
-            return 0.60
+            return 0.6
         elif n < 500:
             return 0.40
         elif n < 1000:

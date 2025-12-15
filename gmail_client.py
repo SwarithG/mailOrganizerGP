@@ -70,13 +70,36 @@ class GmailClient:
             body["removeLabelIds"] = labels_to_remove
         return self.service.users().messages().modify(userId="me", id=message_id, body=body).execute()
 
-    def move_to_trash(self, message_ids: List[str]):
+    def move_to_trash(self, message_ids: List[str]) -> tuple[int, int]:
+        """Move messages to trash by adding TRASH label and removing INBOX label.
+        Returns (success_count, failure_count)"""
+        success_count = 0
+        failure_count = 0
         for mid in message_ids:
             try:
-                self.service.users().messages().modify(
+                self.service.users().messages().trash(
                     userId='me',
-                    id=mid,
-                    body={"addLabelIds": ["TRASH"], "removeLabelIds": []}
+                    id=mid
                 ).execute()
+                success_count += 1
+                print(f"Successfully moved {mid} to trash")
             except Exception as e:
-                print(f"Failed to delete {mid}: {e}")
+                failure_count += 1
+                print(f"Failed to move {mid} to trash: {e}")
+        return success_count, failure_count
+
+    def archive_messages(self, message_ids: List[str]) -> tuple[int, int]:
+        """Archive messages by removing INBOX label.
+        Returns (success_count, failure_count)"""
+        success_count = 0
+        failure_count = 0
+        for mid in message_ids:
+            try:
+                self.modify_labels(mid, labels_to_add=[], labels_to_remove=["INBOX"])
+                success_count += 1
+                print(f"Successfully archived {mid}")
+            except Exception as e:
+                failure_count += 1
+                print(f"Failed to archive {mid}: {e}")
+        return success_count, failure_count
+    

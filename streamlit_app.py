@@ -4,10 +4,10 @@ from gmail_client import GmailClient
 from processor import extract_plaintext_from_raw
 from clustering import Clusterer
 from claude_client import summarize_cluster, safe_delete_score_for_message
-from delete_worker import bulk_delete_with_retry
 from utils import chunks
 import pandas as pd
 import threading
+import ast
 
 st.set_page_config(layout="wide", page_title="Gmail Archives Cleaner")
 
@@ -30,9 +30,9 @@ if "cluster_labels" not in st.session_state:
 
 col1, col2 = st.columns([1, 3])
 with col1:
-    q = st.text_input("Gmail query (leave blank for all):", value="")
-    max_fetch = st.number_input("Max messages to fetch", min_value=100, max_value=50000, value=2000, step=100)
-    if st.button("Scan Inbox / Archive"):
+    q = st.text_input("Gmail query (leave blank for all):", value="", key="query_input")
+    max_fetch = st.number_input("Max messages to fetch", min_value=100, max_value=50000, value=2000, step=100, key="max_fetch_input")
+    if st.button("Scan Inbox / Archive", key="scan_button"):
         with st.spinner("Listing message IDs..."):
             ids = gmail.list_message_ids(query=q, max_results=max_fetch)
             st.session_state["message_ids"] = ids
@@ -107,19 +107,28 @@ with col2:
                 cols = st.columns([3, 1, 1])
                 if cols[2].button("Delete entire group", key=f"del_group_{cid}"):
                     # confirm
-                    if st.checkbox(f"Are you sure you want to DELETE all {len(indices)} messages in this group? This is irreversible."):
+                    if st.checkbox(f"Are you sure you want to DELETE all {len(indices)} messages in this group? This is irreversible.", key=f"confirm_delete_{cid}"):
                         ids_to_delete = [mids[i] for i in indices]
-                        bulk_delete_with_retry(gmail, ids_to_delete)
-                        st.success(f"Deleted {len(ids_to_delete)} messages.")
+                        with st.spinner("Permanently deleting messages..."):
+                            success_count, failure_count = gmail.move_to_trash(ids_to_delete)
+                        if success_count > 0:
+                            st.success(f"Successfully trashed {success_count} messages.")
+                        if failure_count > 0:
+                            st.error(f"Failed to trash {failure_count} messages. Check console for details.")
+                        # Clear clusters after deletion to refresh view
+                        if success_count > 0:
+                            st.rerun()
                 if cols[1].button("Archive entire group", key=f"archive_group_{cid}"):
-                    # naive: remove INBOX label
-                    for i in indices:
-                        mid = mids[i]
-                        try:
-                            gmail.modify_labels(mid, labels_to_add=[], labels_to_remove=["INBOX"])
-                        except Exception as e:
-                            pass
-                    st.success("Archived group (best-effort).")
+                    ids_to_archive = [mids[i] for i in indices]
+                    with st.spinner("Archiving messages..."):
+                        success_count, failure_count = gmail.archive_messages(ids_to_archive)
+                    if success_count > 0:
+                        st.success(f"Successfully archived {success_count} messages.")
+                    if failure_count > 0:
+                        st.error(f"Failed to archive {failure_count} messages. Check console for details.")
+                    # Refresh view after archiving
+                    if success_count > 0:
+                        st.rerun()
 
                 # sample preview
                 sample_idx = indices[:10]
@@ -134,7 +143,7 @@ with col2:
                         "snippet": mmeta.get("snippet", "")[:180]
                     })
                 df = pd.DataFrame(rows)
-                sel = st.multiselect("Select emails to preview/delete (select rows below)", options=list(df['message_id']), format_func=lambda x: df[df['message_id']==x]['subject'].values[0])
+                sel = st.multiselect("Select emails to preview/delete (select rows below)", options=list(df['message_id']), format_func=lambda x: df[df['message_id']==x]['subject'].values[0], key=f"multiselect_{cid}")
                 if sel:
                     # show full bodies in a modal-like area
                     for mid in sel:
@@ -143,23 +152,36 @@ with col2:
                         text = extract_plaintext_from_raw(raw_raw) if raw_raw else "(no raw body cached)"
                         st.markdown(f"**From:** {st.session_state['msgs_meta'][mid]['from']}  ")
                         st.markdown(f"**Subject:** {st.session_state['msgs_meta'][mid]['subject']}  ")
-                        st.text_area("Full email", value=text[:10000], height=300, key=f"email_{mid}")
+                        st.text_area("Full email", value=text[:10000], height=300, key=f"email_{cid}_{mid}")
                         # safe-delete prediction for the single message
-                        if st.button(f"Check safe-delete for this email ({mid[:8]})", key=f"score_{mid}"):
+                        if st.button(f"Check safe-delete for this email ({mid[:8]})", key=f"score_{cid}_{mid}"):
                             with st.spinner("Asking Claude..."):
                                 out = safe_delete_score_for_message(text)
-                                st.write(out)
+                                # Parse the string response into a dict
+                                import json, re
+                                m = re.search(r'\{.*\}', out, re.S)
+                                if m:
+                                    try:
+                                        parsed_out = json.loads(m.group(0))
+                                    except json.JSONDecodeError:
+                                        try:
+                                            parsed_out = ast.literal_eval(m.group(0))
+                                        except (ValueError, SyntaxError):
+                                            parsed_out = {"score": "Error", "reason": f"Could not parse response: {out}"}
+                                else:
+                                    parsed_out = {"score": "Error", "reason": f"No dict found in response: {out}"}
+                                st.write(parsed_out["score"])
+                                st.caption(parsed_out["reason"])
 
-                    # if st.button("Delete selected emails (permanently)"):
-                    #     if st.checkbox("Confirm permanent deletion of selected messages?"):
-                    #         ids_to_delete = sel
-                    #         bulk_delete_with_retry(gmail, ids_to_delete)
-                    #         st.success(f"Deleted {len(ids_to_delete)} messages.")
-                    if st.button("Delete selected emails (permanently)"):
-                        if st.checkbox("Confirm permanent deletion of selected messages?"):
-                            ids_to_delete = sel
-                            # safer + works with gmail.modify
-                            gmail.move_to_trash(ids_to_delete)
-                            st.success(f"Moved {len(ids_to_delete)} messages to Trash.")
+                    if st.button("Delete selected emails (permanently)", key=f"delete_selected_{cid}"):
+                        ids_to_delete = sel
+                        with st.spinner("Moving messages to trash..."):
+                            success_count, failure_count = gmail.move_to_trash(ids_to_delete)
+                        if success_count > 0:
+                            st.success(f"Successfully moved {success_count} messages to Trash.")
+                        if failure_count > 0:
+                            st.error(f"Failed to move {failure_count} messages to Trash. Check console for details.")
+                        # Clear selection after deletion
+                        st.rerun()
     else:
         st.info("Scan your mailbox to see clusters.")
