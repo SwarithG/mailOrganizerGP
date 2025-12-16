@@ -11,6 +11,17 @@ class Clusterer:
     def __init__(self, model_name: str = MODEL_NAME):
         self.model = SentenceTransformer(model_name)
 
+    def pick_threshold(self, texts: List[str]):
+        n = len(texts)
+        if n < 200:
+            return 0.6
+        elif n < 500:
+            return 0.55
+        elif n < 1000:
+            return 0.5
+        else:
+            return 0.4   # large inbox → slightly tighter
+
     # -----------------------------
     # EMBEDDING
     # -----------------------------
@@ -24,7 +35,7 @@ class Clusterer:
     def agglomerative(
         self,
         texts: List[str],
-        distance_threshold: float = 0.35
+        distance_threshold: float = 100.00
     ) -> Dict[int, List[int]]:
         """
         Hierarchical clustering using cosine distance.
@@ -32,6 +43,9 @@ class Clusterer:
         """
         if not texts:
             return {}
+        
+        if distance_threshold == 100.00:
+            distance_threshold = self.pick_threshold(texts)
 
         emb = self.embed_texts(texts)
         emb = normalize(emb)  # required for cosine metric
@@ -101,17 +115,6 @@ class Clusterer:
         else:
             raise ValueError("method must be either 'agglomerative' or 'kmeans'.")
 
-    def pick_threshold(self, texts: List[str], emb: np.ndarray):
-        n = len(texts)
-        if n < 200:
-            return 0.6
-        elif n < 500:
-            return 0.40
-        elif n < 1000:
-            return 0.36
-        else:
-            return 0.33   # large inbox → slightly tighter
-
     # -------------------------
     # SIMPLE K SELECTION
     # -------------------------
@@ -133,7 +136,7 @@ class Clusterer:
         emb_norm = normalize(emb)
 
         # 2. Adaptive threshold selection
-        threshold = self.pick_threshold(texts, emb)
+        threshold = self.pick_threshold(texts)
 
         # 3. First pass: Agglomerative
         agg = AgglomerativeClustering(
