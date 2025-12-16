@@ -1,10 +1,8 @@
 # claude_client.py
 import os
 from typing import List, Dict, Any
-import time
 import anthropic
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -30,7 +28,7 @@ def summarize_cluster(cluster_texts: List[str], max_chars: int = 1200) -> str:
     # return resp.completion.strip()
     response = client.messages.create(
         model="claude-3-7-sonnet-20250219",
-        max_tokens=512,
+        max_tokens=256,
         messages=[
             {"role": "user", "content": f"{prompt}"}
         ]

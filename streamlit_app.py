@@ -67,7 +67,7 @@ if "cluster_labels" not in st.session_state:
 col1, col2 = st.columns([1, 3])
 with col1:
     q = st.text_input("Gmail query (leave blank for all):", value="", key="query_input")
-    max_fetch = st.number_input("Max messages to fetch", min_value=100, max_value=50000, value=2000, step=100, key="max_fetch_input")
+    max_fetch = st.number_input("Max messages to fetch", min_value=100, max_value=50000, value=300, step=100, key="max_fetch_input")
     if st.button("Scan Inbox / Archive", key="scan_button"):
         with st.spinner("Listing message IDs..."):
             ids = gmail.list_message_ids(query=q, max_results=max_fetch)
@@ -123,12 +123,32 @@ with col2:
                 # call claude to label/summarize
                 with st.spinner(f"Labeling cluster {cid}..."):
                     try:
-                        out = summarize_cluster(sample_texts)
+                        #Skip Claude call for clusters with less than 2 emails
+                        if len(sample_texts) <2:
+                            ind = mapping[cid]
+                            for i in ind:
+                                mid = mids[i]
+                                meta = st.session_state["msgs_meta"].get(mid, {})
+                                out = json.dumps({
+                                    "label": meta.get('subject',''),
+                                    "summary": meta.get('subject','')
+                                })
+                        elif len(sample_texts) == 2:
+                            ind = mapping[cid]
+                            for i in ind:
+                                mid = mids[i]
+                                meta = st.session_state["msgs_meta"].get(mid, {})
+                                out = json.dumps({
+                                    "label": meta.get('from',''),
+                                    "summary": meta.get('subject','')
+                                })
+                        else:
+                            out = summarize_cluster(sample_texts)
                     except Exception as e:
                         out = f'{{"label":"Cluster {cid}","summary":"Could not call Claude: {e}"}}'
                 # Claude returns text; try to parse minimal JSON heuristically
                 import json, re
-                m = re.search(r'\{.*\}', out, re.S)
+                m = re.search(r'\{.*\}', out, re.S) # type: ignore
                 if m:
                     try:
                         j = json.loads(m.group(0))
