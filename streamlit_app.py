@@ -9,7 +9,7 @@ import pandas as pd
 import threading
 import ast
 
-st.set_page_config(layout="wide", page_title="Gmail Archives Cleaner")
+st.set_page_config(layout="wide", page_title="Email Organizer")
 
 @st.cache_resource
 def get_clients():
@@ -19,7 +19,43 @@ def get_clients():
 
 gmail, clusterer = get_clients()
 
-st.title("Gmail Archives Cleaner — Streamlit Prototype")
+st.title("Email Organizer — Prototype")
+
+def remove_mids_from_clusters(deleted_mids):
+    clusters_state = st.session_state["clusters"]
+    mapping = clusters_state["mapping"]
+    mids = clusters_state["mids"]
+    texts = clusters_state["texts"]
+
+    # build index map
+    keep = [(i, mid) for i, mid in enumerate(mids) if mid not in deleted_mids]
+
+    if not keep:
+        st.session_state["clusters"] = {}
+        return
+
+    new_texts = []
+    new_mids = []
+    old_to_new = {}
+
+    for new_i, (old_i, mid) in enumerate(keep):
+        old_to_new[old_i] = new_i
+        new_mids.append(mid)
+        new_texts.append(texts[old_i])
+
+    new_mapping = {}
+    for cid, indices in mapping.items():
+        new_indices = [
+            old_to_new[i] for i in indices if i in old_to_new
+        ]
+        if new_indices:
+            new_mapping[cid] = new_indices
+
+    st.session_state["clusters"] = {
+        "mapping": new_mapping,
+        "texts": new_texts,
+        "mids": new_mids
+    }
 
 if "msgs_meta" not in st.session_state:
     st.session_state["msgs_meta"] = {}
@@ -64,15 +100,23 @@ with col1:
         clusters = clusterer.hybrid_clusters(texts)
         st.session_state["clusters"] = {"mapping": clusters, "texts": texts, "mids": mids}
         st.success(f"Formed {len(clusters)} clusters.")
-
 with col2:
-    if "clusters" in st.session_state and st.session_state["clusters"]:
-        st.header("Clusters")
-        mapping = st.session_state["clusters"]["mapping"]
-        texts = st.session_state["clusters"]["texts"]
-        mids = st.session_state["clusters"]["mids"]
-        cluster_summaries = {}
-        for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
+    clusters_state = st.session_state.get("clusters", {})
+
+    # ---- GUARD ----
+    if not clusters_state or not clusters_state.get("mapping"):
+        st.info("No emails left to display.")
+        st.stop()
+    # ----------------
+
+    st.header("Clusters")
+
+    mapping = clusters_state["mapping"]
+    texts = clusters_state["texts"]
+    mids = clusters_state["mids"]
+
+    cluster_summaries = {}
+    for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
             label = st.session_state["cluster_labels"].get(str(cid))
             if not label:
                 sample_texts = [texts[i] for i in indices[:6]]
@@ -100,35 +144,38 @@ with col2:
             cluster_summaries[cid] = st.session_state["cluster_labels"][str(cid)]
 
         # Display cluster cards
-        for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
+    for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
             meta = cluster_summaries[cid]
             with st.expander(f"{meta['label']} — {len(indices)} emails"):
+                #Index safety check
+                indices = [i for i in indices if i < len(mids)]
+                if not indices:
+                    continue
                 st.write(meta['summary'])
                 cols = st.columns([3, 1, 1])
                 if cols[2].button("Delete entire group", key=f"del_group_{cid}"):
-                    # confirm
-                    if st.checkbox(f"Are you sure you want to DELETE all {len(indices)} messages in this group? This is irreversible.", key=f"confirm_delete_{cid}"):
-                        ids_to_delete = [mids[i] for i in indices]
-                        with st.spinner("Permanently deleting messages..."):
-                            success_count, failure_count = gmail.move_to_trash(ids_to_delete)
-                        if success_count > 0:
-                            st.success(f"Successfully trashed {success_count} messages.")
-                        if failure_count > 0:
-                            st.error(f"Failed to trash {failure_count} messages. Check console for details.")
-                        # Clear clusters after deletion to refresh view
-                        if success_count > 0:
-                            st.rerun()
+                    ids_to_delete = [mids[i] for i in indices]
+                    with st.spinner("Permanently deleting messages..."):
+                        success_count, failure_count = gmail.move_to_trash(ids_to_delete)
+                    if success_count > 0:
+                        st.success(f"Successfully trashed {success_count} messages.")
+                        for mid in ids_to_delete:
+                            st.session_state["msgs_meta"].pop(mid, None)
+                        remove_mids_from_clusters(ids_to_delete)
+                        st.rerun()
+                        st.session_state.pop(f"multiselect_{cid}", None)
                 if cols[1].button("Archive entire group", key=f"archive_group_{cid}"):
                     ids_to_archive = [mids[i] for i in indices]
                     with st.spinner("Archiving messages..."):
                         success_count, failure_count = gmail.archive_messages(ids_to_archive)
                     if success_count > 0:
                         st.success(f"Successfully archived {success_count} messages.")
-                    if failure_count > 0:
-                        st.error(f"Failed to archive {failure_count} messages. Check console for details.")
-                    # Refresh view after archiving
-                    if success_count > 0:
+                        # Remove archived messages from session state
+                        for mid in ids_to_archive:
+                            st.session_state["msgs_meta"].pop(mid, None)
+                        remove_mids_from_clusters(ids_to_archive)
                         st.rerun()
+                        st.session_state.pop(f"multiselect_{cid}", None)
 
                 # sample preview
                 sample_idx = indices[:10]
@@ -179,9 +226,10 @@ with col2:
                             success_count, failure_count = gmail.move_to_trash(ids_to_delete)
                         if success_count > 0:
                             st.success(f"Successfully moved {success_count} messages to Trash.")
-                        if failure_count > 0:
-                            st.error(f"Failed to move {failure_count} messages to Trash. Check console for details.")
-                        # Clear selection after deletion
-                        st.rerun()
+                            for mid in ids_to_delete:
+                                st.session_state["msgs_meta"].pop(mid, None)
+                            remove_mids_from_clusters(ids_to_delete)
+                            st.rerun()
+                            st.session_state.pop(f"multiselect_{cid}", None)
     else:
         st.info("Scan your mailbox to see clusters.")
