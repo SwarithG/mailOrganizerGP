@@ -176,3 +176,6 @@ class Clusterer:
                 next_id += 1
 
         return final_clusters
+    
+    def cluster_signature(self,cluster_mids):
+        return tuple(sorted(cluster_mids))

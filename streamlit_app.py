@@ -6,8 +6,8 @@ from clustering import Clusterer
 from claude_client import summarize_cluster, safe_delete_score_for_message
 from utils import chunks
 import pandas as pd
-import threading
 import ast
+import json
 
 st.set_page_config(layout="wide", page_title="Email Organizer")
 
@@ -22,40 +22,19 @@ gmail, clusterer = get_clients()
 st.title("Email Organizer — Prototype")
 
 def remove_mids_from_clusters(deleted_mids):
-    clusters_state = st.session_state["clusters"]
-    mapping = clusters_state["mapping"]
-    mids = clusters_state["mids"]
-    texts = clusters_state["texts"]
-
-    # build index map
-    keep = [(i, mid) for i, mid in enumerate(mids) if mid not in deleted_mids]
-
-    if not keep:
-        st.session_state["clusters"] = {}
+    clusters = st.session_state.get("clusters", {})
+    if not clusters:
         return
 
-    new_texts = []
-    new_mids = []
-    old_to_new = {}
+    new_clusters = {}
 
-    for new_i, (old_i, mid) in enumerate(keep):
-        old_to_new[old_i] = new_i
-        new_mids.append(mid)
-        new_texts.append(texts[old_i])
+    for cid, cluster_mids in clusters.items():
+        # keep only message IDs not in deleted_mids
+        remaining = [mid for mid in cluster_mids if mid not in deleted_mids]
+        if remaining:
+            new_clusters[cid] = remaining
 
-    new_mapping = {}
-    for cid, indices in mapping.items():
-        new_indices = [
-            old_to_new[i] for i in indices if i in old_to_new
-        ]
-        if new_indices:
-            new_mapping[cid] = new_indices
-
-    st.session_state["clusters"] = {
-        "mapping": new_mapping,
-        "texts": new_texts,
-        "mids": new_mids
-    }
+    st.session_state["clusters"] = new_clusters
 
 if "msgs_meta" not in st.session_state:
     st.session_state["msgs_meta"] = {}
@@ -96,160 +75,179 @@ with col1:
             txt = f"Subject: {d.get('subject','')}\n{d.get('snippet','')}"
             texts.append(txt)
             mids.append(mid)
-        # cluster
-        clusters = clusterer.hybrid_clusters(texts)
-        st.session_state["clusters"] = {"mapping": clusters, "texts": texts, "mids": mids}
-        st.success(f"Formed {len(clusters)} clusters.")
-with col2:
-    clusters_state = st.session_state.get("clusters", {})
+        # New Signature Based Clusters
 
-    # ---- GUARD ----
-    if not clusters_state or not clusters_state.get("mapping"):
-        st.info("No emails left to display.")
-        st.stop()
-    # ----------------
+        index_clusters = clusterer.hybrid_clusters(texts)
+        clusters = {
+            cid: [mids[i] for i in indices]
+            for cid,indices in index_clusters.items()
+        }
+        st.session_state["clusters"] = clusters
+        st.success(f"Formed {len(clusters)} clusters.")
+        st.session_state['cluster_labels'] = {}
+with col2:
+    clusters = st.session_state.get("clusters", {})
 
     st.header("Clusters")
 
-    mapping = clusters_state["mapping"]
-    texts = clusters_state["texts"]
-    mids = clusters_state["mids"]
-
     cluster_summaries = {}
-    for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
-            label = st.session_state["cluster_labels"].get(str(cid))
-            if not label:
-                sample_texts = [texts[i] for i in indices[:6]]
-                # call claude to label/summarize
-                with st.spinner(f"Labeling cluster {cid}..."):
-                    try:
-                        #Skip Claude call for clusters with less than 2 emails
-                        if len(sample_texts) <2:
-                            ind = mapping[cid]
-                            for i in ind:
-                                mid = mids[i]
-                                meta = st.session_state["msgs_meta"].get(mid, {})
-                                out = json.dumps({
-                                    "label": meta.get('subject',''),
-                                    "summary": meta.get('subject','')
-                                })
-                        elif len(sample_texts) == 2:
-                            ind = mapping[cid]
-                            for i in ind:
-                                mid = mids[i]
-                                meta = st.session_state["msgs_meta"].get(mid, {})
-                                out = json.dumps({
-                                    "label": meta.get('from',''),
-                                    "summary": meta.get('subject','')
-                                })
-                        else:
-                            out = summarize_cluster(sample_texts)
-                    except Exception as e:
-                        out = f'{{"label":"Cluster {cid}","summary":"Could not call Claude: {e}"}}'
-                # Claude returns text; try to parse minimal JSON heuristically
-                import json, re
-                m = re.search(r'\{.*\}', out, re.S) # type: ignore
+    for cid, cluster_mids in sorted(clusters.items(), key=lambda x: -len(x[1])):
+            sig = clusterer.cluster_signature(cluster_mids)
+            if sig not in st.session_state["cluster_labels"]:
+                try:
+                    # Build sample texts
+                    sample_texts = []
+                    for mid in cluster_mids[:6]:
+                        meta = st.session_state["msgs_meta"][mid]
+                        sample_texts.append(
+                            f"Subject: {meta.get('subject','')}\n{meta.get('snippet','')}"
+                        )
+
+                    # ---- LABELING STRATEGY ----
+                    if len(cluster_mids) == 1:
+                        meta = st.session_state["msgs_meta"][cluster_mids[0]]
+                        out = json.dumps({ # pyright: ignore[reportPossiblyUnboundVariable]
+                            "label": meta.get("subject", "Single email"),
+                            "summary": meta.get("snippet", "")
+                        })
+
+                    elif len(cluster_mids) == 2:
+                        meta = st.session_state["msgs_meta"][cluster_mids[0]]
+                        out = json.dumps({ # pyright: ignore[reportPossiblyUnboundVariable]
+                            "label": meta.get("from", "Two emails"),
+                            "summary": meta.get("subject", "")
+                        })
+
+                    else:
+                        out = summarize_cluster(sample_texts)
+
+                except Exception as e:
+                    out = json.dumps({ # pyright: ignore[reportPossiblyUnboundVariable]
+                        "label": "Cluster",
+                        "summary": f"Labeling failed: {e}"
+                    })
+
+                # ---- PARSE RESULT ----
+                import re, json
+                m = re.search(r"\{.*\}", out, re.S)
                 if m:
                     try:
                         j = json.loads(m.group(0))
-                        label = j.get("label", f"Cluster {cid}")
-                        summ = j.get("summary", "")
+                        label = j.get("label", "Cluster")
+                        summary = j.get("summary", "")
                     except Exception:
-                        label = f"Cluster {cid}"
-                        summ = out
+                        label = "Cluster"
+                        summary = out
                 else:
-                    label = f"Cluster {cid}"
-                    summ = out
-                st.session_state["cluster_labels"][str(cid)] = {"label": label, "summary": summ}
-            cluster_summaries[cid] = st.session_state["cluster_labels"][str(cid)]
+                    label = "Cluster"
+                    summary = out
+
+                st.session_state["cluster_labels"][sig] = {
+                    "label": label,
+                    "summary": summary
+                }
+
+            cluster_summaries[cid] = st.session_state["cluster_labels"][sig]
 
         # Display cluster cards
-    for cid, indices in sorted(mapping.items(), key=lambda x: -len(x[1])):
-            meta = cluster_summaries[cid]
-            with st.expander(f"{meta['label']} — {len(indices)} emails"):
-                #Index safety check
-                indices = [i for i in indices if i < len(mids)]
-                if not indices:
-                    continue
-                st.write(meta['summary'])
-                cols = st.columns([3, 1, 1])
-                if cols[2].button("Delete entire group", key=f"del_group_{cid}"):
-                    ids_to_delete = [mids[i] for i in indices]
-                    with st.spinner("Permanently deleting messages..."):
+    for cid, indices in sorted(clusters.items(), key=lambda x: -len(x[1])):
+
+        cluster_mids = indices
+        sig = clusterer.cluster_signature(cluster_mids)
+
+        # Fetch stable label
+        meta = st.session_state["cluster_labels"].get(
+            sig,
+            {"label": "Unlabeled", "summary": ""}
+        )
+
+        with st.expander(f"{meta['label']} — {len(indices)} emails"):
+
+            st.write(meta["summary"])
+
+            cols = st.columns([3, 1, 1])
+    
+            # Delete group
+            if cols[2].button("Delete entire group", key=f"del_group_{cid}"):
+                with st.spinner("Permanently deleting messages..."):
+                    success_count, failure_count = gmail.move_to_trash(cluster_mids)
+
+                if success_count > 0:
+                    st.success(f"Successfully trashed {success_count} messages.")
+                    for mid in cluster_mids:
+                        st.session_state["msgs_meta"].pop(mid, None)
+                    remove_mids_from_clusters(cluster_mids)
+                    st.rerun()
+
+            # Archive group
+            if cols[1].button("Archive entire group", key=f"archive_group_{cid}"):
+                with st.spinner("Archiving messages..."):
+                    success_count, failure_count = gmail.archive_messages(cluster_mids)
+
+                if success_count > 0:
+                    st.success(f"Successfully archived {success_count} messages.")
+                    for mid in cluster_mids:
+                        st.session_state["msgs_meta"].pop(mid, None)
+                    remove_mids_from_clusters(cluster_mids)
+                    st.rerun()
+
+            # Preview table
+            rows = []
+            for mid in cluster_mids[:10]:
+                mmeta = st.session_state["msgs_meta"].get(mid, {})
+                rows.append({
+                    "message_id": mid,
+                    "from": mmeta.get("from", "")[:80],
+                    "subject": mmeta.get("subject", "")[:120],
+                    "snippet": mmeta.get("snippet", "")[:180]
+                })
+
+            df = pd.DataFrame(rows)
+            sel = st.multiselect(
+                "Select emails to preview/delete (select rows below)",
+                options=list(df['message_id']),
+                format_func=lambda x: df[df['message_id']==x]['subject'].values[0],
+                key=f"multiselect_{cid}"
+            )
+            if sel:
+                # show full bodies in a modal-like area
+                for mid in sel:
+                    raw = gmail.get_message_raw(mid)
+                    raw_raw = raw.get("raw", "")
+                    text = extract_plaintext_from_raw(raw_raw) if raw_raw else "(no raw body cached)"
+                    st.markdown(f"**From:** {st.session_state['msgs_meta'][mid]['from']}  ")
+                    st.markdown(f"**Subject:** {st.session_state['msgs_meta'][mid]['subject']}  ")
+                    st.text_area("Full email", value=text[:10000], height=300, key=f"email_{cid}_{mid}")
+                    # safe-delete prediction for the single message
+                    if st.button(f"Check safe-delete for this email ({mid[:8]})", key=f"score_{cid}_{mid}"):
+                        with st.spinner("Asking Claude..."):
+                            out = safe_delete_score_for_message(text)
+                            # Parse the string response into a dict
+                            import json, re
+                            m = re.search(r'\{.*\}', str(out), re.S)
+                            if m:
+                                try:
+                                    parsed_out = json.loads(m.group(0))
+                                except json.JSONDecodeError:
+                                    try:
+                                        parsed_out = ast.literal_eval(m.group(0))
+                                    except (ValueError, SyntaxError):
+                                        parsed_out = {"score": "Error", "reason": f"Could not parse response: {out}"}
+                            else:
+                                parsed_out = {"score": "Error", "reason": f"No dict found in response: {out}"}
+                            st.write(parsed_out["score"])
+                            st.caption(parsed_out["reason"])
+
+                if st.button("Delete selected emails (permanently)", key=f"delete_selected_{cid}"):
+                    ids_to_delete = sel
+                    with st.spinner("Moving messages to trash..."):
                         success_count, failure_count = gmail.move_to_trash(ids_to_delete)
                     if success_count > 0:
-                        st.success(f"Successfully trashed {success_count} messages.")
+                        st.success(f"Successfully moved {success_count} messages to Trash.")
                         for mid in ids_to_delete:
                             st.session_state["msgs_meta"].pop(mid, None)
                         remove_mids_from_clusters(ids_to_delete)
                         st.rerun()
                         st.session_state.pop(f"multiselect_{cid}", None)
-                if cols[1].button("Archive entire group", key=f"archive_group_{cid}"):
-                    ids_to_archive = [mids[i] for i in indices]
-                    with st.spinner("Archiving messages..."):
-                        success_count, failure_count = gmail.archive_messages(ids_to_archive)
-                    if success_count > 0:
-                        st.success(f"Successfully archived {success_count} messages.")
-                        # Remove archived messages from session state
-                        for mid in ids_to_archive:
-                            st.session_state["msgs_meta"].pop(mid, None)
-                        remove_mids_from_clusters(ids_to_archive)
-                        st.rerun()
-                        st.session_state.pop(f"multiselect_{cid}", None)
-
-                # sample preview
-                sample_idx = indices[:10]
-                rows = []
-                for i in sample_idx:
-                    mid = mids[i]
-                    mmeta = st.session_state["msgs_meta"].get(mid, {})
-                    rows.append({
-                        "message_id": mid,
-                        "from": mmeta.get("from", "")[:80],
-                        "subject": mmeta.get("subject", "")[:120],
-                        "snippet": mmeta.get("snippet", "")[:180]
-                    })
-                df = pd.DataFrame(rows)
-                sel = st.multiselect("Select emails to preview/delete (select rows below)", options=list(df['message_id']), format_func=lambda x: df[df['message_id']==x]['subject'].values[0], key=f"multiselect_{cid}")
-                if sel:
-                    # show full bodies in a modal-like area
-                    for mid in sel:
-                        raw = gmail.get_message_raw(mid)
-                        raw_raw = raw.get("raw", "")
-                        text = extract_plaintext_from_raw(raw_raw) if raw_raw else "(no raw body cached)"
-                        st.markdown(f"**From:** {st.session_state['msgs_meta'][mid]['from']}  ")
-                        st.markdown(f"**Subject:** {st.session_state['msgs_meta'][mid]['subject']}  ")
-                        st.text_area("Full email", value=text[:10000], height=300, key=f"email_{cid}_{mid}")
-                        # safe-delete prediction for the single message
-                        if st.button(f"Check safe-delete for this email ({mid[:8]})", key=f"score_{cid}_{mid}"):
-                            with st.spinner("Asking Claude..."):
-                                out = safe_delete_score_for_message(text)
-                                # Parse the string response into a dict
-                                import json, re
-                                m = re.search(r'\{.*\}', out, re.S)
-                                if m:
-                                    try:
-                                        parsed_out = json.loads(m.group(0))
-                                    except json.JSONDecodeError:
-                                        try:
-                                            parsed_out = ast.literal_eval(m.group(0))
-                                        except (ValueError, SyntaxError):
-                                            parsed_out = {"score": "Error", "reason": f"Could not parse response: {out}"}
-                                else:
-                                    parsed_out = {"score": "Error", "reason": f"No dict found in response: {out}"}
-                                st.write(parsed_out["score"])
-                                st.caption(parsed_out["reason"])
-
-                    if st.button("Delete selected emails (permanently)", key=f"delete_selected_{cid}"):
-                        ids_to_delete = sel
-                        with st.spinner("Moving messages to trash..."):
-                            success_count, failure_count = gmail.move_to_trash(ids_to_delete)
-                        if success_count > 0:
-                            st.success(f"Successfully moved {success_count} messages to Trash.")
-                            for mid in ids_to_delete:
-                                st.session_state["msgs_meta"].pop(mid, None)
-                            remove_mids_from_clusters(ids_to_delete)
-                            st.rerun()
-                            st.session_state.pop(f"multiselect_{cid}", None)
     else:
         st.info("Scan your mailbox to see clusters.")
